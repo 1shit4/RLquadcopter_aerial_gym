@@ -47,6 +47,7 @@ class Vehicle():
         self.arming_state = None
         self.nav_state = None
         self.offboard = False
+        self.received_odom = False
         self.sp_count = 0
         self.quats = [1,2,1,2]
 
@@ -68,6 +69,9 @@ class Vehicle():
 
         self.pos = [-msg.position[0]/10, msg.position[1]/10, -msg.position[2]/10]
         self.LV = [-msg.velocity[0]/10, msg.velocity[1]/10, -msg.velocity[2]/10]
+        self.received_odom = True
+        # self.pos = [msg.position[1]/10, msg.position[0]/10, -msg.position[2]/10]
+        # self.LV = [msg.velocity[1]/10, msg.velocity[0]/10, -msg.velocity[2]/10]
         # self.LV = msg.velocity/10
         # self.LV[2] = -self.LV[2]
 
@@ -176,7 +180,7 @@ class Vehicle():
         msg = VehicleRatesSetpoint()
         msg2 = VehicleTorqueSetpoint()
         msg3 = ActuatorMotors()
-        print(rates)
+        # print(rates)
         # msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
         # msg.roll = rates[1].item()
         # msg.pitch = rates[2].item()
