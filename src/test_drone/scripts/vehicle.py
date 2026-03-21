@@ -1,6 +1,9 @@
 import rclpy
 from rclpy.node import Node
 from px4_msgs.msg import VehicleOdometry, SensorCombined, VehicleRatesSetpoint, TrajectorySetpoint, VehicleCommand, VehicleStatus, OffboardControlMode, VehicleAttitude, VehicleTorqueSetpoint, ActuatorMotors
+from control_msgs.msg import DynamicJointState
+from std_msgs.msg import Float64MultiArray
+from geometry_msgs.msg import Twist
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 import torch
 from enum import IntEnum
@@ -50,28 +53,37 @@ class Vehicle():
         self.received_odom = False
         self.sp_count = 0
         self.quats = [1,2,1,2]
+        self.joint_pos = np.zeros(3)
+        self.joint_vel = np.zeros(3)
+        self.joint_eff = np.zeros(3)
 
         # ---- Examples: Create a subscription ----
         self.odometry_sub = self.node.create_subscription(VehicleOdometry, '/fmu/out/vehicle_odometry', self.odometry_callback, qos_sub)
         self.imu_gyro_sub = self.node.create_subscription(SensorCombined, '/fmu/out/sensor_combined', self.imu_gyro_callback, qos_sub)
-        self.status_sub = self.node.create_subscription(VehicleStatus, 'fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_sub)
+        # self.status_sub = self.node.create_subscription(VehicleStatus, 'fmu/out/vehicle_status_v1', self.vehicle_status_callback, qos_sub)
         self.attitude_sub = self.node.create_subscription(VehicleAttitude, '/fmu/out/vehicle_attitude', self.attitude_callback, qos_sub)
+        self.joint_sub = self.node.create_subscription(DynamicJointState, '/dynamic_joint_states', self.joint_state_callback, qos_sub)
         
 
         self.ctbr_pub = self.node.create_publisher(VehicleRatesSetpoint, '/fmu/in/vehicle_rates_setpoint', qos_pub)
+        # self.ctbr_publisher = self.node.create_publisher(Twist, '/control/rates_thrust_setpoint', 10)
+        self.ctbr_publisher = self.node.create_publisher(Float64MultiArray, '/control/rl_actions', 10)
+
         self.torque_pub = self.node.create_publisher(VehicleTorqueSetpoint, '/fmu/in/vehicle_torque_setpoint', qos_pub)
         self.motor_pub = self.node.create_publisher(ActuatorMotors, '/fmu/in/actuator_motors', qos_pub)
         self.publisher_trajectory = self.node.create_publisher(TrajectorySetpoint, 'fmu/in/trajectory_setpoint', qos_pub)
         self.cmd_pub = self.node.create_publisher(VehicleCommand, '/fmu/in/vehicle_command', qos_pub)
         self.publisher_offboard_mode = self.node.create_publisher(OffboardControlMode, '/fmu/in/offboard_control_mode', qos_pub)
+        self.joint_target_pub = self.node.create_publisher(Float64MultiArray,'/arm_position_controller/commands', qos_pub)
+
 
     def odometry_callback(self, msg):
 
-        self.pos = [-msg.position[0]/10, msg.position[1]/10, -msg.position[2]/10]
-        self.LV = [-msg.velocity[0]/10, msg.velocity[1]/10, -msg.velocity[2]/10]
+        # self.pos = [-msg.position[0], msg.position[1], -msg.position[2]]
+        # self.LV = [-msg.velocity[0], msg.velocity[1], -msg.velocity[2]]
         self.received_odom = True
-        # self.pos = [msg.position[1]/10, msg.position[0]/10, -msg.position[2]/10]
-        # self.LV = [msg.velocity[1]/10, msg.velocity[0]/10, -msg.velocity[2]/10]
+        self.pos = [msg.position[1], msg.position[0], -msg.position[2]]
+        self.LV = [msg.velocity[1], msg.velocity[0], -msg.velocity[2]]
         # self.LV = msg.velocity/10
         # self.LV[2] = -self.LV[2]
 
@@ -89,91 +101,102 @@ class Vehicle():
         self.AV = [msg.gyro_rad[1], msg.gyro_rad[0], -msg.gyro_rad[2]]
         # self.AV = msg.gyro_rad
 
-    def vehicle_status_callback(self, msg):
-        # TODO: handle NED->ENU transformation
-        # print("NAV_STATUS: ", msg.nav_state)
-        # print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
-        self.nav_state = msg.nav_state
-        self.arming_state = msg.arming_state
+    # def vehicle_status_callback(self, msg):
+    #     # TODO: handle NED->ENU transformation
+    #     # print("NAV_STATUS: ", msg.nav_state)
+    #     # print("  - offboard status: ", VehicleStatus.NAVIGATION_STATE_OFFBOARD)
+    #     self.nav_state = msg.nav_state
+    #     self.arming_state = msg.arming_state
+
+    def joint_state_callback(self, msg):
+        L = min(len(msg.interface_values), 3)
+        for i in range(L):
+            vals = msg.interface_values[i].values
+            if len(vals) >= 1:
+                self.joint_pos[i] = vals[0]
+            if len(vals) >= 2:
+                self.joint_vel[i] = vals[1]
+            if len(vals) >= 3:
+                self.joint_eff[i] = vals[2]
 
     def timer_callback(self):
         self.node.get_logger().info("Timer callback triggered")
 
-    def change_mode(self, mode):
-        msg = VehicleCommand()
-        msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
+    # def change_mode(self, mode):
+    #     msg = VehicleCommand()
+    #     msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
 
-        msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
-        msg.param1 = 1.0           # base mode flag (custom mode)
-        msg.param2 = float(mode)           # OFFBOARD mode number
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
+    #     msg.command = VehicleCommand.VEHICLE_CMD_DO_SET_MODE
+    #     msg.param1 = 1.0           # base mode flag (custom mode)
+    #     msg.param2 = float(mode)           # OFFBOARD mode number
+    #     msg.target_system = 1
+    #     msg.target_component = 1
+    #     msg.source_system = 1
+    #     msg.source_component = 1
+    #     msg.from_external = True
 
-        self.cmd_pub.publish(msg)
-        self.node.get_logger().info("Sent OFFBOARD mode command")
+    #     self.cmd_pub.publish(msg)
+    #     self.node.get_logger().info("Sent OFFBOARD mode command")
 
-    def arm_vehicle(self):
+    # def arm_vehicle(self):
 
-        msg = VehicleCommand()
-        msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
+    #     msg = VehicleCommand()
+    #     msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
 
-        msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
-        msg.param1 = 1.0     # ARM
-        msg.target_system = 1
-        msg.target_component = 1
-        msg.source_system = 1
-        msg.source_component = 1
-        msg.from_external = True
+    #     msg.command = VehicleCommand.VEHICLE_CMD_COMPONENT_ARM_DISARM
+    #     msg.param1 = 1.0     # ARM
+    #     msg.target_system = 1
+    #     msg.target_component = 1
+    #     msg.source_system = 1
+    #     msg.source_component = 1
+    #     msg.from_external = True
 
-        self.cmd_pub.publish(msg)
-        # self.node.get_logger().info("Sent ARM command")
+    #     self.cmd_pub.publish(msg)
+    #     # self.node.get_logger().info("Sent ARM command")
 
-    def offboard_control(self):
+    # def offboard_control(self):
 
-        offboard_msg = OffboardControlMode()
-        offboard_msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
+    #     offboard_msg = OffboardControlMode()
+    #     offboard_msg.timestamp = int(self.node.get_clock().now().nanoseconds / 1000)
 
-        offboard_msg.position = False
-        offboard_msg.velocity = False
-        offboard_msg.acceleration = False
-        offboard_msg.attitude = False
-        offboard_msg.body_rate = True
-        offboard_msg.thrust_and_torque = False
-        offboard_msg.direct_actuator = False
+    #     offboard_msg.position = False
+    #     offboard_msg.velocity = False
+    #     offboard_msg.acceleration = False
+    #     offboard_msg.attitude = False
+    #     offboard_msg.body_rate = True
+    #     offboard_msg.thrust_and_torque = False
+    #     offboard_msg.direct_actuator = False
 
-        self.publisher_offboard_mode.publish(offboard_msg)
+    #     self.publisher_offboard_mode.publish(offboard_msg)
 
-    def enable_offboard(self):
+    # def enable_offboard(self):
 
-        self.offboard_control()
-        if self.sp_count == 20:
+    #     self.offboard_control()
+    #     if self.sp_count == 20:
 
-            self.set_trajectory([0, 0, 0])
-            self.arm_vehicle()
-            self.node.get_logger().info('Vehicle ARMED!')
-            self.offboard = True
+    #         self.set_trajectory([0, 0, 0])
+    #         self.arm_vehicle()
+    #         self.node.get_logger().info('Vehicle ARMED!')
+    #         self.offboard = True
         
-        if self.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
-            self.change_mode(PX4FlightMode.OFFBOARD)
-            self.set_trajectory([0, 0, 0])
+    #     if self.nav_state != VehicleStatus.NAVIGATION_STATE_OFFBOARD:
+    #         self.change_mode(PX4FlightMode.OFFBOARD)
+    #         self.set_trajectory([0, 0, 0])
 
-        self.set_trajectory([0,0,0])
+    #     self.set_trajectory([0,0,0])
 
-        if self.sp_count <= 21:
-            self.sp_count += 1
+    #     if self.sp_count <= 21:
+    #         self.sp_count += 1
 
-    def set_trajectory(self, pos):
+    # def set_trajectory(self, pos):
 
-        trajectory_msg = TrajectorySetpoint()
+    #     trajectory_msg = TrajectorySetpoint()
 
     
-        trajectory_msg.position[0] = pos[0]
-        trajectory_msg.position[1] = pos[1]
-        trajectory_msg.position[2] = pos[2]
-        self.publisher_trajectory.publish(trajectory_msg)
+    #     trajectory_msg.position[0] = pos[0]
+    #     trajectory_msg.position[1] = pos[1]
+    #     trajectory_msg.position[2] = pos[2]
+    #     self.publisher_trajectory.publish(trajectory_msg)
 
     def publish_ctbr(self, rates):
 
@@ -206,3 +229,40 @@ class Vehicle():
         # print(f"MESSAGE: {msg}")
 
         self.ctbr_pub.publish(msg)
+
+    # def publish_ctbr_asmc(self, rates):
+    #     msg = Twist()
+
+    #     # --- SET YOUR DESIRED VALUES HERE ---
+        
+    #     # Example 1: Stable Hover
+    #     msg.linear.z = float(rates[0])    # Hover thrust (0.0 to 1.0)
+    #     msg.angular.x = float(rates[2])    # Roll Rate (rad/s)
+    #     msg.angular.y = float(rates[1])    # Pitch Rate (rad/s)
+    #     msg.angular.z = float(-rates[3])   # Yaw Rate (rad/s)
+        
+    #     self.ctbr_publisher.publish(msg)
+
+    def publish_ctbr_asmc(self, rates):
+        msg = Float64MultiArray()
+
+        # --- SET YOUR DESIRED VALUES HERE ---
+        
+        # Example 1: Stable Hover
+        # msg.data[0] = float(rates[1]) 
+        # msg.data[1] = float(rates[0])  
+        # msg.data[2] = -float(rates[2])   
+        # msg.data[3] = float(rates[4])
+        # msg.data[4] = float(rates[3])  
+        # msg.data[5] = float(-rates[5])   
+        # msg.data[6] = float(-rates[6])
+        msg.data = [float(rates[1]), float(rates[0]), float(-rates[2]), float(rates[4]), float(rates[3]), float(-rates[5]), float(-rates[6])]
+        
+        self.ctbr_publisher.publish(msg)
+
+    def publish_joints(self, joint_pos):
+
+        msg = Float64MultiArray()
+        msg.data = [float(joint_pos[0]), float(joint_pos[1]), float(joint_pos[2])]
+        self.joint_target_pub.publish(msg)
+

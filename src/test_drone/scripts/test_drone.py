@@ -1,7 +1,9 @@
 import rclpy
 from rclpy.node import Node
 from px4_msgs.msg import VehicleOdometry, SensorCombined, VehicleRatesSetpoint, TrajectorySetpoint, VehicleCommand, VehicleStatus, OffboardControlMode
+from control_msgs.msg import DynamicJointState
 from trajectory_msgs.msg import MultiDOFJointTrajectory
+from std_msgs.msg import Float64MultiArray
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy, QoSDurabilityPolicy
 import torch
 from vehicle import Vehicle
@@ -11,8 +13,6 @@ import math
 from scipy.spatial.transform import Rotation as R
 import csv
 from collections import deque
-import numpy as np
-from scipy.spatial.transform import Rotation as R
 
 def gravity_in_frd(px4_quat, vector):
     """
@@ -55,60 +55,16 @@ class Control(Node):
         super().__init__('drone_control')   # Node name
         self.get_logger().info("Control has started!")        
         self.vehicle = Vehicle(self)
-        self.target = target_pos
-        self.target_x = 0.0
-        self.target_y = 0.0
-        self.target_z = 0.15 #0.25
-        self.i = 0
-        self.yaw_rate = 0
+
+        self.model = LoadONNX("models/13-21-06-58.onnx")
+
+        self.target_pos = np.array([0.0, 0.0, 2.5])
+        self.target_quat = np.array([0.0, 0.0, 0.0, 1.0])   #[x, y, z, w]
+
         self.sim_dt = 0.02
-        # self.model = ModelLoader("policy.pt")
-        # self.model = LoadONNX("models/dr_none.onnx")
-        # self.model = LoadONNX("models/dr_m0.5_a0.2.onnx")
-        # self.model = LoadONNX("models/dr_m0.5_a_0.2_i_0.2.onnx")
-        # self.model = LoadONNX("models/dr_m0.7_a_0.2_i_0.2.onnx")
-        # self.model = LoadONNX("models/dr_m0.3_a0.1_i0.1.onnx")
-        # self.model = LoadONNX("models/EpisodeV.onnx")
-        self.model = LoadONNX("models/2upe.onnx")
-
-        self.Gz = -9.81
-        self.mass = 2.0
-        self.inertia = np.array([[0.02166666666666667, 0, 0], 
-                                [0, 0.02166666666666667, 0],
-                                [0, 0, 0.04000000000000001]])
-        
-        self.kin_inv = np.array([[16.6, 0, 0], 
-                                [0, 16.6, 0],
-                                [0, 0, 5.0]])
-        
-        arm_l = 0.17
-        kappa = 0.016
-        
-        t_BM = (arm_l * np.sqrt(0.5) *
-                    np.array([
-                        [ 1, -1, -1,  1],
-                        [-1, -1,  1,  1],
-                        [ 0,  0,  0,  0]
-                    ])
-                )
-        
-        self.allocation_matrix = np.vstack([ np.ones(4),
-                                        t_BM[:2, :],
-                                        kappa * np.array([1, -1, 1, -1])
-                                    ])
-        
-        self.inverse_allocat = np.linalg.inv(self.allocation_matrix)
-    
-        # print(f'INERTIA: {self.inertia}')
-
-        self.mean = np.ones(4)*(-self.Gz)
-        self.std = np.ones(4)*(-self.Gz)*0.35
-
-        self.total_thrust = self.mean*1.35
-
         self.i = 0
 
-        #self.action_array = np.load("/home/vasudevan/Desktop/flightmare/flightrl/examples/actions_anh.npy")
+        self.mass = 2.433
 
         # ---- Examples: Create a timer ----
         timer_period = 0.02  # seconds
@@ -138,11 +94,11 @@ class Control(Node):
         self.stats_timer = self.create_timer(5.0, self.print_statistics)
         self.last_stats_print = self.get_clock().now()
 
-
-        self.a = []
         # self.maxthrst = 9.413
         # self.maxthrst = 7.25      #hover servo output = 840, hover pwm = 0.81176. for 2.4 kgs -> max_thr = 7.25144
-        self.maxthrst = 6.81
+        # self.maxthrst = 6.81
+        self.maxthrst = 7.43    #hover servo output = 832.5, hover pwm = 080294. for 2.433 kgs -> max_thr = mg/4*hover_pwm =7.43
+
 
     def trajectory_callback(self, msg):
         """Callback to receive and store trajectory points."""
@@ -153,165 +109,172 @@ class Control(Node):
             # Extract position (from transforms[0].translation)
             if len(point.transforms) > 0:
                 transform = point.transforms[0]
-                self.target_x = transform.translation.x/10
-                self.target_y = transform.translation.y/10
-                self.target_z = transform.translation.z/10
+                self.target_pos[0] = transform.translation.x/10
+                self.target_pos[1] = transform.translation.y/10
+                self.target_pos[2] = transform.translation.z/10
                 
                 self.get_logger().info(
                     f'Received target: x={self.target_x:.3f}, '
                     f'y={self.target_y:.3f}, z={self.target_z:.3f}'
                 )
 
-    def get_thrust(self, action):
+    def get_thrust(self, acc_z):
 
-        action[0] = action[0]*self.mass
+        force_z = (acc_z + 9.81) * self.mass
+        norm_thrust = force_z/(self.maxthrst*4)
 
-        # err = action[1:4] - self.vehicle.AV
-        # print(f"error {err}")
-        # print(f"av {self.vehicle.AV}")
-
-        # action[1:4] = self.inertia @ self.kin_inv @ err + np.cross(self.vehicle.AV, self.inertia @ self.vehicle.AV)
-
-        # print(f"ACTION 1: {action}")
-        # action[1:4] = [0, 0, 0]
-
-        # action[3] = 0.0
-
-        thrust = action
-        # print(thrust.shape)
-
-        # thrust = self.inverse_allocat @ action
-
-        # print(f"ACTION 2: {thrust}")
-
-        # thrust /= (9.81*2*self.mass/4)
-        # thrust /= self.maxthrst
-
-        thrust[0] = thrust[0]/(self.maxthrst*4)
-
-        thrust[0] = np.clip(thrust[0], 0, 1.0)
-        # print(f"ACTION 3: {thrust}")
-        # omega_cmd = np.sqrt(thrust)
-        # thrust[0] = np.sqrt(thrust[0])
-
-        # print(f"ACTION 4: {omega_cmd}")
-
-
-        return thrust
+        return np.clip(norm_thrust, 0.0, 1.0)
 
     def get_control(self):
 
-        # print(f"CURRENT POS: {self.vehicle.pos}")
-        # print(f"CURRENT VEL: {self.vehicle.LV}")
-        curr = self.vehicle.pos.copy()
-        # curr[2] = -curr[2]
-        # temp = curr[0]
-        # curr[0] = curr[1]
-        # curr[1] = temp
-        # curr = curr/10
-        # cv = self.vehicle.LV.copy()
-        # cv[2] = -cv[2]
-        # temp = cv[0]
-        # cv[0] = cv[1]
-        # cv[1] = temp
-        # curr[0] = curr[0]
-        # self.target_x = 0.0   #(by 10)
-        # self.target_y = 0.0
-        # self.target_z = 1.0
-        target_train_z = 1.0
-        curr[0] = curr[0] + self.target_x   
-        curr[1] = curr[1] - self.target_y
-        curr[2] = curr[2] + (target_train_z - self.target_z)
-        vel = (np.linalg.norm(self.vehicle.LV))*10
-        print(f"VEL: {vel}")
-        # print("goal_local: ", goal_local)
-        # eu = [0, 0, 0]
-        # r = R.from_euler("zyx", eu)
-        r = R.from_quat(self.vehicle.quats)
-        # print(self.vehicle.quats)
+        drone_pos = np.array(self.vehicle.pos.copy())
+        drone_linvel = np.array(self.vehicle.LV.copy())
+        # r = R.from_quat(self.vehicle.quats)
 
-        ned_to_enu = np.array([[0, 1, 0],
+        ned_to_enu = np.array([[0, 1, 0],    #this is a symmetric matrix (A)T = A
                                [1, 0, 0],
                                [0, 0, -1]])
         
-        r_lfu_enu = ned_to_enu @ r.as_matrix() @ ned_to_enu.T    #ned_to_enu = rfu_to_frd  #the correct frame is rfu not lfu
+        # r_lfu_enu = ned_to_enu @ r.as_matrix() @ ned_to_enu.T    #ned_to_enu = rfu_to_frd  #the correct frame is rfu not lfu
 
-        # print(f"quats: {R.from_matrix(r_lfu_enu).as_quat()}")
-        # print(r.as_matrix())
-        
-        # r_enu = ned_to_enu @ r.as_matrix()
+        joint_pos = np.array(self.vehicle.joint_pos)
+        joint_vel = np.array(self.vehicle.joint_vel)
 
-        # print(r_enu)
+        drone_quat = np.array(self.vehicle.quats)
+        drone_R_frd_ned = R.from_quat(drone_quat)
+        drone_R_rfu_enu = ned_to_enu @ drone_R_frd_ned.as_matrix() @ ned_to_enu
+        drone_R6 = self.R6_from_9(drone_R_rfu_enu)
+        drone_quat = R.from_matrix(drone_R_rfu_enu).as_quat()
 
-        angst = R.from_matrix(r_lfu_enu).as_euler("ZYX", degrees=True)
+        ee_pos, r_ee = self.calculate_ee_state(drone_pos, drone_quat, joint_pos)
+        ee_matrix = r_ee.as_matrix()
 
-        #angst[0] = 90 + angst[0]
-        angst[0] = 0
+        drone_rel_pos = self.target_pos - drone_pos
+        ee_rel_pos = self.target_pos - ee_pos
 
-        rrk = R.from_euler("ZYX", angst, degrees=True).as_matrix()
+        target_R = R.from_quat(self.target_quat)
 
-        # ang[0] = 0
-        # ang[0] = 90-ang[0]
-        # ang[2] = -ang[2]
-        # ang[2] = -ang[2]
-        # print(f"EULER ZYX: {ang}")
-        #rr = R.from_euler("ZXY", angst, degrees=True)
+        target_R_rel_ee = ee_matrix.T@ target_R.as_matrix()
+        target_R_flat = target_R_rel_ee.flatten()
 
+        obs = np.concatenate([drone_rel_pos/10, drone_R6, drone_linvel/10, self.vehicle.AV, ee_rel_pos/10, target_R_flat, joint_pos, joint_vel]).astype(np.float32)
 
-        # temp = ang[2]
-        # ang[2] = ang[1]
-        # ang[1] = temp
-        # rr = R.from_euler
-        # print(f"ANGLE : {angst}")
-        # euler = rr.as_matrix()
-        # euler = r.as_matrix()
-
-        # euler = np.reshape(euler, (9,), "F")
-        # euler = np.reshape(euler, (9,), "F")
-        euler = np.reshape(rrk, (9,), "F")
-        # print(len(self.vehicle.pos))
-        obs = np.concatenate([curr, euler, self.vehicle.LV, self.vehicle.AV, [self.yaw_rate]]).astype(np.float32)
-
-        obs = np.expand_dims(obs, axis=0)
+        obs_input = np.expand_dims(obs, axis=0)
         # obs = np.array([[5.6962529e-03, -6.5228711e-03,  1.0015297e+00,  9.9984783e-01, 1.7444085e-02, -1.6304986e-06, -1.7444085e-02,  9.9984783e-01, 2.7210058e-06,  1.6777152e-06, -2.6921496e-06,  1.0000000e+00, 4.7197806e-05, -8.3191735e-05, -9.5338997e-05, -3.4885236e-06, -1.6702197e-06,  3.5352804e-04,  1.8199615e+00]]).astype(np.float32)
-        # print(f"OBSERVATION: {obs}")
-        raw_action = self.model.predict(obs)
+        print(f"OBSERVATION: {obs}")
+        raw_action = self.model.predict(obs_input)
         # print(f"RAW_ACTION: {raw_action}")
 
-        raw_action = raw_action.numpy()
+        if hasattr(raw_action, 'numpy'):
+            raw_action = raw_action.numpy()
+        
+        if raw_action.ndim > 1:
+            raw_action = raw_action.squeeze()
         #print(raw_action.shape)
         # print(raw_action)
 
-        action = np.zeros((raw_action.shape))
+        action = np.zeros_like(raw_action)
+        actions_clipped = np.clip(raw_action, -1, 1)
 
-        # # action[:, :, 0] = self.std[0]*raw_action[:, :, 0] + self.mean[0]
-        action[:, :, 0] = raw_action[:, :, 0] + 9.81
-        # action[0] = action[0] + 9.81
-        # # if action[:, :, 0] > self.total_thrust[0]:
-        #     # action[:, :, 0] = self.total_thrust[0]
+        action[0] = actions_clipped[0]*5.0
+        action[1] = actions_clipped[1]*5.0
+        action[2] = actions_clipped[2]*9.81
+        action[3] = actions_clipped[3]*8.0
+        action[4] = actions_clipped[4]*8.0
+        action[5] = actions_clipped[5]*6.0
+        action[6] = actions_clipped[6]*np.pi/2
+        action[7] = actions_clipped[7]*1.57 -1.57
+        action[8] = actions_clipped[8]*2.094
+        action[9] = actions_clipped[9]*3.14
 
-        # # action[:, :, 0] = raw_action[:, :, 0]*self.mean[0]
-        action[:, :, 1:3] = raw_action[:, :, 1  :3]*5
-        # print(f"RAW_ACTION 2: {action}")
-        # action[:,:, 1] = action[:,:, 1]
-        #action[:, :, 3] = raw_action[:, :, 3]
-        # action[:, :, 3] = -raw_action[:,:, 3]*0.1
-        # action[1:4] = action[1:4]*5
-        action = action.squeeze(0)
-        action = action.squeeze(0)
-        # action[3] = -raw_action[:,:, 3]
-        # print(action.shape)
-        # action[0] = min(action[0], 9.81*1.39)
-        # action[0] = action[0]/(9.81*1.39)
        
-        thrust = self.get_thrust(action)
+        # norm_thrust = self.get_thrust(action[0])
 
-        # print(f"Final trhsut {thrust}")
+        # ctbr = np.array([norm_thrust, action[1], action[2], action[3]])
+        # joints = np.array([action[4], action[5], action[6]]) 
 
-        self.yaw_rate += angst[0]*self.sim_dt
+        ctbr = np.array([action[0], action[1], action[2], action[3] ,action[4], action[5], action[6]])
+        joints = np.array([action[7], action[8], action[9]]) 
 
-        return thrust
+        return ctbr, joints
     
+    def calculate_ee_state(self, drone_pos, drone_quat, joint_angles):
+        """
+        Calculates End Effector position based on the X500 PX4 4-Link Arm URDF.
+        
+        Frames:
+        - drone_pos: ENU (East-North-Up)
+        - drone_quat: Transforms Local RFU -> World ENU
+        - local_offset: Calculated natively in RFU (Right-Forward-Up)
+        
+        URDF Pitch Offsets:
+        - Base Mount is pitched 180 deg.
+        - Joint 1 is pitched 90 deg (1.57 rad).
+        - Total static pitch = 270 deg (1.5 * PI). 
+        - At theta=0, arm points horizontally backward.
+        """
+        theta1 = joint_angles[0]
+        theta2 = joint_angles[1]
+        # Safely handle theta3 if your array only has 2 joints right now
+        theta3 = joint_angles[2] if len(joint_angles) > 2 else 0.0
+
+        # URDF Lengths and Offsets
+        j1_x = 0.03       # Small offset in the elbow
+        j1_z = 0.23682    # Length of upper arm
+        j2_z = 0.21599    # Length of lower arm
+        
+        # Base mount is Z = -0.025.
+        # L1 offset is Z = 0.03796
+        # Total Base Z Offset = -0.025 - 0.03796 = -0.06296
+        base_z_offset = -0.06296
+        
+        # --- POSITION (Local RFU Frame) ---
+        # Arm swings in the mid-sagittal plane, so Right (X) is 0
+        ee_x_local = 0.0
+        
+        # Forward/Backward extension (Y in RFU)
+        ee_y_local = j1_x * math.sin(theta1) - j1_z * math.cos(theta1) - j2_z * math.cos(theta1 + theta2)
+        
+        # Up/Down extension (Z in RFU)
+        ee_z_local = base_z_offset + j1_x * math.cos(theta1) + j1_z * math.sin(theta1) + j2_z * math.sin(theta1 + theta2)
+        
+        # Construct Local Offset Vector (Right, Forward, Up)
+        local_offset = np.array([ee_x_local, ee_y_local, ee_z_local])
+        
+        # Apply Drone Orientation to get World (ENU) Position
+        r_drone = R.from_quat(drone_quat) 
+        world_ee_pos = drone_pos + r_drone.apply(local_offset)
+
+        # --- ORIENTATION ---
+        # A. Swing Rotation
+        # URDF rotates around the Y axis (Left). In RFU, Left is the Negative X-axis.
+        # Total static offset = 1.5 * PI (270 degrees).
+        swing_angle_x = -(1.5 * math.pi + theta1 + theta2)
+        r_swing = R.from_rotvec([swing_angle_x, 0.0, 0.0])
+        
+        # B. Twist Rotation (Rotation around local +Z axis by theta3)
+        r_twist = R.from_rotvec([0.0, 0.0, theta3])
+
+        # Combine rotations: Swing first, then Twist
+        r_arm_local = r_swing * r_twist
+
+        # Combine with Drone Rotation: (Drone Rotation) * (Arm Rotation)
+        r_ee_world = r_drone * r_arm_local
+        
+        # Returns the world position, and the 3x3 Rotation Matrix
+        return world_ee_pos, r_ee_world
+
+    def R6_from_9(self, R_matrix):
+        """
+        Converts 3x3 Rotation Matrix to 6D representation.
+        Takes first two columns of the rotation matrix.
+        Output shape: (6,)
+        """
+        # R_matrix is 3x3. 
+        # col1 = R_matrix[:, 0], col2 = R_matrix[:, 1]
+        r6 = np.concatenate([R_matrix[:, 0], R_matrix[:, 1]])
+        return r6
+
     def get_flightmare_policy(self, raw_action):
 
         # print(self.vehicle.pos)
@@ -349,36 +312,27 @@ class Control(Node):
     def timer_callback(self):
 
         if not self.vehicle.received_odom:
+            self.get_logger().info("Waiting for first odometry message from PX4...", throttle_duration_sec=2)
             return
 
-        if not self.vehicle.offboard:
-            self.vehicle.enable_offboard()
-            return
+        # if not self.vehicle.offboard:
+        #     self.vehicle.enable_offboard()
+        #     return
         
-        # yo = np.array([ 18.8423, 0.00409635, 0.010741, 0.2])
+        ctbr, joint_setpoints = self.get_control()
+        # print(f"ctbr: {ctbr}")
+        # print(f"joint setpoints: {joint_setpoints}")
+        # print("\n")
 
-        # yoyo = self.inverse_allocat @ yo
+        # self.vehicle.offboard_control()
 
-        # print(yoyo)
-        
-        # if self.i < 300:
-        #     # print(f"allo: {self.allocation_matrix}")
-        #     # print(f"allo I: {self.inverse_allocat}")
-        #     print(self.action_array[self.i, :])
-        #     thrust = self.get_control(self.action_array[self.i, :])
-        #     self.vehicle.offboard_control()
-        #     self.vehicle.publish_ctbr(thrust)
-        #     self.i += 1
-        thrust = self.get_control()
-        # thrust = [1,2,3,4]
-        self.vehicle.offboard_control()
-        # print(f"THRUST : {thrust}")
-        self.vehicle.publish_ctbr(thrust)
+        self.vehicle.publish_ctbr_asmc(ctbr)
+        self.vehicle.publish_joints(joint_setpoints)
 
         curr_pos = self.vehicle.pos.copy()
-        error_x = - self.target_x - curr_pos[0]  # Assuming obs[0] is current x
-        error_y = self.target_y - curr_pos[1]  # Assuming obs[1] is current y
-        error_z = self.target_z - curr_pos[2]  # Assuming obs[2] is current z
+        error_x = self.target_pos[0] - curr_pos[0]  # Assuming obs[0] is current x
+        error_y = self.target_pos[1] - curr_pos[1]  # Assuming obs[1] is current y
+        error_z = self.target_pos[2] - curr_pos[2]  # Assuming obs[2] is current z
         error_magnitude = np.sqrt(error_x**2 + error_y**2 + error_z**2)
         
         # Store error for statistics
@@ -392,15 +346,11 @@ class Control(Node):
             writer = csv.writer(f)
             writer.writerow([
                 current_time,
-                - self.target_x, self.target_y, self.target_z,
+                - self.target_pos[0], self.target_pos[1], self.target_pos[2],
                 curr_pos[0], curr_pos[1], curr_pos[2],
                 error_x, error_y, error_z,
                 error_magnitude
             ])
-
-        # print("ACC: ", self.vehicle.LA[2])
-
-        # self.vehicle.set_trajectory([5, 0, -5])
 
     def print_statistics(self):
         """Print tracking statistics every few seconds"""
@@ -429,11 +379,9 @@ class Control(Node):
             self.print_statistics()
         super().destroy_node()
         
-       
 
 def main(args=None):
     rclpy.init(args=args)
-    # target = get_input()
     target = [0.5,0,0]
     node = Control(target)
     try:
