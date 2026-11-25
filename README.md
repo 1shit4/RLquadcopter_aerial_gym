@@ -2,7 +2,7 @@
 
 **ROS 2 interface for running goal-conditioned aerial-manipulator policies trained in Aerial Gym with a PX4–Gazebo vehicle and robotic arm.**
 
-This repository supports the [Robust Goal-Directed Aerial Manipulation project](https://github.com/1shit4/aerial-manipulation-rl-control). The corresponding [Aerial Gym repository](https://github.com/1shit4/aerial_gym_simulator) implements goal-directed control of an aerial manipulator using reinforcement learning and a disturbance-compensating inner-loop controller. This workspace implements the **inference-side interface** between the learned policy, PX4 vehicle feedback, the external flight controller, and the arm's joint controller.
+This repository supports the [Robust Goal-Directed Aerial Manipulation project](https://github.com/ishita-chaudhary/aerial-manipulation-rl-control). The corresponding [Aerial Gym repository](https://github.com/ishita-chaudhary/aerial_gym_simulator) implements goal-directed control of an aerial manipulator using reinforcement learning and a disturbance-compensating inner-loop controller. This workspace implements the **inference-side interface** between the learned policy, PX4 vehicle feedback, the external flight controller, and the arm's joint controller.
 
 ## Policy Inference Interface
 
@@ -38,7 +38,7 @@ The interface processes **10 normalized policy outputs**:
 
 The seven vehicle commands are sent together to the external flight-control interface; the three joint-position references are sent to the arm controller. This action space is **acceleration + body rates + yaw + joint positions**, rather than the four-element collective-thrust/body-rate (CTBR) action used in the earlier standalone-quadrotor experiments.
 
-The corresponding disturbance-compensating flight-control laws are documented in the [quadrotor inner-loop control repository](https://github.com/1shit4/quadcopter_inner_loop_control).
+The corresponding disturbance-compensating flight-control laws are documented in the [quadrotor inner-loop control repository](https://github.com/ishita-chaudhary/quadcopter_inner_loop_control).
 
 ## Trajectory and Tracking Utilities
 
@@ -58,9 +58,9 @@ The workspace uses **ROS 2, PX4 ROS messages, Gazebo, NumPy, SciPy, PyTorch, and
 
 ## Related Repositories
 
-- [Aerial Manipulation — Project Overview](https://github.com/1shit4/aerial-manipulation-rl-control): research objective and index of experimental implementations.
-- [Aerial Gym Simulator](https://github.com/1shit4/aerial_gym_simulator): goal-conditioned aerial-manipulator RL task, policy training, and controller-in-the-loop implementation.
-- [Quadrotor Inner-Loop Control](https://github.com/1shit4/quadcopter_inner_loop_control): disturbance-compensating control algorithms and PX4 interfaces.
-- [Flightmare Policy Inference](https://github.com/1shit4/RLQuadcopterControlFlightmare): related sim-to-sim policy-inference implementation for standalone quadrotor control.
+- [Aerial Manipulation — Project Overview](https://github.com/ishita-chaudhary/aerial-manipulation-rl-control): research objective and index of experimental implementations.
+- [Aerial Gym Simulator](https://github.com/ishita-chaudhary/aerial_gym_simulator): goal-conditioned aerial-manipulator RL task, policy training, and controller-in-the-loop implementation.
+- [Quadrotor Inner-Loop Control](https://github.com/ishita-chaudhary/quadcopter_inner_loop_control): disturbance-compensating control algorithms and PX4 interfaces.
+- [Flightmare Policy Inference](https://github.com/ishita-chaudhary/RLQuadcopterControlFlightmare): related sim-to-sim policy-inference implementation for standalone quadrotor control.
 
 *Research conducted collaboratively at the Robotics Research Center, IIIT Hyderabad.*
